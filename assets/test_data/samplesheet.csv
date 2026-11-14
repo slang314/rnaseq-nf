@@ -1,0 +1,5 @@
+sample,fastq_1,fastq_2,condition
+ctrl_rep1,ctrl_rep1_R1.fastq.gz,ctrl_rep1_R2.fastq.gz,control
+ctrl_rep2,ctrl_rep2_R1.fastq.gz,ctrl_rep2_R2.fastq.gz,control
+trt_rep1,trt_rep1_R1.fastq.gz,trt_rep1_R2.fastq.gz,treated
+trt_rep2,trt_rep2_R1.fastq.gz,trt_rep2_R2.fastq.gz,treated

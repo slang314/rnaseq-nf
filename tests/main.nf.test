@@ -1,0 +1,37 @@
+nextflow_pipeline {
+
+    name "rnaseq-nf end-to-end on synthetic data"
+    script "../main.nf"
+    tag "pipeline"
+
+    test("recovers the simulated 4x up / 4x down genes") {
+
+        when {
+            params {
+                outdir = "$outputDir"
+            }
+        }
+
+        then {
+            // Mean TPM for one gene across the samples whose name starts with a prefix
+            def tpm = path("$outputDir/salmon/merged_gene_tpm.tsv").readLines()*.split('\t')
+            def header = tpm[0] as List
+            def mean = { String gene, String prefix ->
+                def row  = tpm.find { it[0] == gene } as List
+                def cols = (1..<header.size()).findAll { header[it].startsWith(prefix) }
+                cols.collect { row[it] as double }.sum() / cols.size()
+            }
+
+            assertAll(
+                { assert workflow.success },
+                { assert path("$outputDir/multiqc/multiqc_report.html").exists() },
+                { assert path("$outputDir/salmon/merged_gene_counts.tsv").exists() },
+                { assert path("$outputDir/salmon/ctrl_rep1/quant.sf").exists() },
+                // Biology check: the known answer from scripts/simulate_test_data.py
+                { assert mean('GENE_UP',   'trt') / mean('GENE_UP',   'ctrl') > 2.5 },
+                { assert mean('GENE_DOWN', 'ctrl') / mean('GENE_DOWN', 'trt') > 2.5 },
+                { assert (mean('GENE_A', 'trt') / mean('GENE_A', 'ctrl') - 1).abs() < 0.5 }
+            )
+        }
+    }
+}

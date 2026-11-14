@@ -1,0 +1,10 @@
+title: "rnaseq-nf QC report"
+report_comment: "FastQC (raw reads), fastp (trimming) and Salmon (mapping) for every sample."
+module_order:
+  - fastqc
+  - fastp
+  - salmon
+extra_fn_clean_exts:
+  - ".fastp"
+  - "_R1"
+  - "_R2"
