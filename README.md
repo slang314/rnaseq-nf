@@ -3,7 +3,8 @@
 A small bulk RNA-seq pipeline written in **Nextflow DSL2**, laid out the way
 nf-core pipelines are (modules, a workflow, configs, profiles, tests and CI).
 It is meant to be read, run and extended while learning how production
-bioinformatics pipelines are built.
+bioinformatics pipelines are built. **[docs/GUIDE.md](docs/GUIDE.md)** explains every
+step, flag, input and output.
 
 ```
 samplesheet.csv
@@ -85,9 +86,30 @@ nextflow run main.nf -profile docker \
     --outdir results_real -resume
 ```
 
-A good public dataset to start with is the "airway" study (GEO GSE52778: airway
-smooth-muscle cells, with and without dexamethasone). Get the reads from SRA with
-`fasterq-dump`, and use `seqtk sample` to take about 2M read pairs per sample for a fast first run.
+Sample names must be unique and file-name safe (letters, digits, `.`, `_`, `-`);
+the pipeline stops before running anything if they aren't. `condition` is carried
+with each sample for a future DE step but does not change any current step. See
+[docs/GUIDE.md](docs/GUIDE.md#4-sample-names-and-conditions).
+
+#### Example: the airway dataset
+
+`scripts/fetch_airway.sh` downloads a small piece of the public "airway" study
+(GEO GSE52778: airway smooth-muscle cells from 4 donors, untreated vs dexamethasone,
+2×63 bp). It streams the first 1M read pairs of each of the 8 samples from ENA
+(about 1 GB instead of about 22 GB), fetches the GENCODE v50 transcriptome, and
+writes a samplesheet to `~/bioinfo-data/airway`:
+
+```bash
+scripts/fetch_airway.sh
+nextflow run main.nf -profile docker \
+    --input ~/bioinfo-data/airway/samplesheet.csv \
+    --transcriptome ~/bioinfo-data/airway/ref/gencode.v50.transcripts.fa.gz --gencode \
+    --outdir ~/bioinfo-data/airway/results -work-dir ~/bioinfo-data/airway/work -resume
+```
+
+The first reads of a run are not a random sample, which is fine for checking the
+pipeline. For numbers you want to report, download the full files and subsample
+with `seqtk sample`.
 
 `-resume` reuses every step that already finished, so you can fix one
 step and rerun without starting over.

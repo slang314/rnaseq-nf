@@ -27,11 +27,23 @@ workflow {
         def sheet    = file(params.input, checkIfExists: true)
         def sheetDir = sheet.parent
 
+        // Read the whole sheet up front (not inside a channel) so problems that need
+        // every row at once, like duplicate names, stop the run before any task starts.
+        def rows = sheet.splitCsv(header: true, strip: true)
+        if (!rows) error "Samplesheet ${sheet} has no sample rows"
+        rows.each { row ->
+            if (!row.sample) error "Samplesheet row is missing 'sample': ${row}"
+            // sample names become file and folder names: keep them file-name safe
+            if (!(row.sample ==~ /[A-Za-z0-9][A-Za-z0-9._-]*/)) {
+                error "Sample name '${row.sample}' may only contain letters, digits, '.', '_' and '-' (and must start with a letter or digit)"
+            }
+        }
+        def dups = rows.countBy { row -> row.sample }.findAll { _name, n -> n > 1 }.keySet()
+        if (dups) error "Duplicate sample names in ${sheet}: ${dups.join(', ')}. One row per sample (merge lane FASTQs first)"
+
         ch_samples = channel
-            .fromPath(sheet)
-            .splitCsv(header: true, strip: true)
+            .fromList(rows)
             .map { row ->
-                if (!row.sample)  error "Samplesheet row is missing 'sample': ${row}"
                 if (!row.fastq_1) error "Sample '${row.sample}' is missing fastq_1"
                 def single = !row.fastq_2
                 def meta   = [id: row.sample, condition: row.condition ?: 'NA', single_end: single]
