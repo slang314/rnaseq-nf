@@ -34,4 +34,56 @@ nextflow_pipeline {
             )
         }
     }
+
+    test("DESeq2 finds the simulated 4x changes (log2FC +2 / -2) and nothing else") {
+
+        when {
+            params {
+                outdir = "$outputDir"
+            }
+        }
+
+        then {
+            // deseq2_results.tsv: gene_id, baseMean, log2FoldChange, lfcSE, stat, pvalue, padj
+            def lines = path("$outputDir/deseq2/deseq2_results.tsv").readLines()*.split('\t')
+            def col   = (lines[0] as List)
+            def res   = lines.drop(1).collectEntries { r -> [r[0], [lfc: r[col.indexOf('log2FoldChange')] as double,
+                                                                padj: r[col.indexOf('padj')]]] }
+            def nulls = ['GENE_A', 'GENE_B', 'GENE_C', 'GENE_D', 'GENE_E', 'GENE_F']
+
+            assertAll(
+                { assert workflow.success },
+                { assert path("$outputDir/deseq2/deseq2_summary.txt").text.contains('treated vs control') },
+                { assert path("$outputDir/deseq2/pca.pdf").exists() },
+                { assert res['GENE_UP'].lfc   > 1.5 && res['GENE_UP'].lfc   < 2.5 },
+                { assert res['GENE_DOWN'].lfc < -1.5 && res['GENE_DOWN'].lfc > -2.5 },
+                { assert (res['GENE_UP'].padj as double)   < 0.01 },
+                { assert (res['GENE_DOWN'].padj as double) < 0.01 },
+                // unchanged genes: DESeq2's median-of-ratios normalisation should remove the
+                // composition shift that TPM shows (0.82x), so they sit near log2FC 0
+                { nulls.each { g -> assert res[g].lfc.abs() < 0.5 } }
+            )
+        }
+    }
+
+    test("one condition: DESeq2 is skipped, quantification still runs") {
+
+        when {
+            params {
+                input  = "${projectDir}/assets/test_data/samplesheet_one_condition.csv"
+                outdir = "$outputDir"
+            }
+        }
+
+        then {
+            assertAll(
+                { assert workflow.success },
+                { assert path("$outputDir/salmon/merged_gene_counts.tsv").exists() },
+                { assert !path("$outputDir/deseq2").exists() },
+                // the task trace lists every task that ran: no DESEQ2 task at all
+                { assert !workflow.trace.tasks().any { t -> t.name.contains('DESEQ2') } },
+                { assert workflow.trace.tasks().any { t -> t.name.contains('SALMON_QUANT') } }
+            )
+        }
+    }
 }

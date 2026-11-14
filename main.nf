@@ -16,6 +16,52 @@ def resolveReads(String p, sheetDir) {
     return file("${sheetDir}/${p}", checkIfExists: true)
 }
 
+// Decide whether DESeq2 can run, from the samplesheet alone (before any task starts).
+// Errors for things that are clearly mistakes (a design column that doesn't exist);
+// a warning + skip for designs that are valid but can't be tested (one condition,
+// no replicates), so QC and quantification still finish.
+def planDeseq2(List rows, header) {
+    if (params.skip_deseq2) return false
+
+    def vars = params.design.toString().replaceFirst(/^\s*~/, '').split(/[+*:]/)*.trim().findAll { v -> v && !(v in ['0', '1']) }
+    if (!vars) error "--design '${params.design}' has no variables"
+    def missing = vars.findAll { v -> !(v in header) }
+    if (missing) error "--design uses column(s) not in the samplesheet: ${missing.join(', ')} (columns: ${header.join(', ')})"
+    vars.each { v ->
+        def empty = rows.findAll { row -> !row[v] }*.sample
+        if (empty) error "Column '${v}' is in the design but empty for: ${empty.join(', ')}"
+    }
+
+    def factor = vars[-1]
+    def compare
+    if (params.contrast) {
+        def c = params.contrast.toString().tokenize(',')*.trim()
+        if (c.size() != 3) error "--contrast must be factor,numerator,denominator (got '${params.contrast}')"
+        factor  = c[0]
+        if (!(factor in vars)) error "--contrast factor '${factor}' is not in --design '${params.design}'"
+        compare = c[1..2]
+    }
+    def counts = rows.countBy { row -> row[factor] }
+    if (counts.size() < 2) {
+        log.warn "Only one '${factor}' value (${counts.keySet().join('')}) in the samplesheet: skipping DESeq2. QC and quantification still run."
+        return false
+    }
+    if (compare) {
+        def unknown = compare.findAll { l -> !(l in counts.keySet()) }
+        if (unknown) error "--contrast level(s) ${unknown.join(', ')} not found in column '${factor}' (values: ${counts.keySet().join(', ')})"
+    } else if (counts.size() > 2) {
+        error "'${factor}' has ${counts.size()} values (${counts.keySet().join(', ')}): say which two to compare with --contrast ${factor},<numerator>,<denominator>"
+    } else {
+        compare = counts.keySet().toList()
+    }
+    def unreplicated = compare.findAll { l -> counts[l] < 2 }
+    if (unreplicated) {
+        log.warn "No replicates for ${factor} = ${unreplicated.join(', ')}: DESeq2 can't estimate variance, skipping it. QC and quantification still run."
+        return false
+    }
+    return true
+}
+
 workflow {
     main:
         if (!params.input)         error "Missing --input (samplesheet CSV: sample,fastq_1,fastq_2,condition)"
@@ -41,6 +87,8 @@ workflow {
         def dups = rows.countBy { row -> row.sample }.findAll { _name, n -> n > 1 }.keySet()
         if (dups) error "Duplicate sample names in ${sheet}: ${dups.join(', ')}. One row per sample (merge lane FASTQs first)"
 
+        def runDeseq2 = planDeseq2(rows, rows[0].keySet())
+
         ch_samples = channel
             .fromList(rows)
             .map { row ->
@@ -55,11 +103,13 @@ workflow {
         RNASEQ(
             ch_samples,
             file(params.transcriptome, checkIfExists: true),
-            params.tx2gene ? file(params.tx2gene, checkIfExists: true) : []   // [] = build it
+            params.tx2gene ? file(params.tx2gene, checkIfExists: true) : [],  // [] = build it
+            sheet,
+            runDeseq2
         )
 
     onComplete:
         log.info(workflow.success
-            ? "\nDone. Results in: ${params.outdir}\n  MultiQC report: ${params.outdir}/multiqc/multiqc_report.html\n"
+            ? "\nDone. Results in: ${params.outdir}\n  MultiQC report: ${params.outdir}/multiqc/multiqc_report.html\n  DESeq2 (if run): ${params.outdir}/deseq2/deseq2_results.tsv\n"
             : "\nPipeline failed. Check .nextflow.log, or rerun with -resume after fixing.\n")
 }

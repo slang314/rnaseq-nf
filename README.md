@@ -15,7 +15,8 @@ samplesheet.csv
                               ▲         │       │
           transcripts.fa ─► SALMON_INDEX│       │
           (tx2gene / MAKE_TX2GENE) ─────┘       │
-                                        └─► MERGE_QUANT ─► gene/transcript count + TPM matrices
+                                        ├─► MERGE_QUANT ─► gene/transcript count + TPM matrices
+          samplesheet metadata ─────────┴─► DESEQ2 (tximport) ─► DE table, PCA, MA, volcano
 ```
 
 ## What this practises
@@ -27,7 +28,7 @@ samplesheet.csv
 | Reproducibility | Pinned tool versions, `software_versions.yml`, run reports in `results/pipeline_info/` |
 | Testing | `nf-test` pipeline test that checks the *biology* (simulated fold changes), Python unit tests |
 | CI / Git | `.github/workflows/ci.yml` runs every test on every push |
-| Standard NGS tools | FastQC, fastp, Salmon, MultiQC |
+| Standard NGS tools | FastQC, fastp, Salmon, MultiQC, tximport + DESeq2 |
 
 ## Setup on Windows (WSL2)
 
@@ -86,9 +87,13 @@ nextflow run main.nf -profile docker \
     --outdir results_real -resume
 ```
 
+Any extra columns (`cell_line`, `batch`, …) can be used in the DESeq2 design:
+`--design '~ cell_line + condition' --contrast condition,dex,untreated`
+(log2FC = dex / untreated). DESeq2 is skipped with a warning when there is only
+one condition or no replicates; design mistakes stop the run before it starts.
+
 Sample names must be unique and file-name safe (letters, digits, `.`, `_`, `-`);
-the pipeline stops before running anything if they aren't. `condition` is carried
-with each sample for a future DE step but does not change any current step. See
+the pipeline stops before running anything if they aren't. See
 [docs/GUIDE.md](docs/GUIDE.md#4-sample-names-and-conditions).
 
 #### Example: the airway dataset
@@ -104,6 +109,7 @@ scripts/fetch_airway.sh
 nextflow run main.nf -profile docker \
     --input ~/bioinfo-data/airway/samplesheet.csv \
     --transcriptome ~/bioinfo-data/airway/ref/gencode.v50.transcripts.fa.gz --gencode \
+    --design '~ cell_line + condition' --contrast condition,dex,untreated \
     --outdir ~/bioinfo-data/airway/results -work-dir ~/bioinfo-data/airway/work -resume
 ```
 
@@ -126,6 +132,7 @@ results/
 │   ├── merged_gene_tpm.tsv
 │   ├── merged_transcript_{counts,tpm}.tsv
 │   └── mapping_summary.tsv
+├── deseq2/            deseq2_results.tsv, normalized + VST counts, PCA / MA / volcano plots, dds.rds
 ├── multiqc/multiqc_report.html
 └── pipeline_info/     timeline, resource report, trace, DAG, software_versions.yml
 ```
@@ -136,8 +143,9 @@ results/
 8 genes, some with alternative isoforms that share exons, 4 samples × 5,000
 read pairs, 0.5% sequencing errors, and 3% short fragments that run into the adapter.
 `GENE_UP` is simulated 4× higher and `GENE_DOWN` 4× lower in "treated". The
-nf-test checks that Salmon recovers those changes, so the test catches
-results that are wrong as well as runs that crash.
+nf-test checks that Salmon recovers those changes and that DESeq2 calls exactly
+those two genes (log2FC ≈ ±2), so the tests catch results that are wrong as well
+as runs that crash. A third test checks that a one-condition samplesheet skips DESeq2 cleanly.
 
 ## Container tags
 
@@ -149,8 +157,8 @@ pull (tags get rebuilt now and then), look up the current tag at
 
 1. **Decoy-aware Salmon index**: add the genome as decoys (`--decoys`); this
    is what nf-core/rnaseq does, and it reduces false mappings.
-2. **DESeq2 module**: an R process that reads `merged_gene_counts.tsv` plus the
-   samplesheet `condition` column and writes a results table and a volcano plot.
+2. ~~**DESeq2 module**~~ done: tximport + DESeq2, design and contrast from the
+   samplesheet. Next: `lfcShrink`, several contrasts per run, DE results in MultiQC.
 3. **Samplesheet validation with the `nf-schema` plugin** and a `nextflow_schema.json`.
 4. **STAR + featureCounts branch** behind a `--aligner star` parameter (the AstraZeneca
    posting lists both).
