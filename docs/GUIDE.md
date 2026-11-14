@@ -19,9 +19,9 @@ Contents
 
 ## 1. What the pipeline is for
 
-**Goal:** turn raw bulk RNA-seq FASTQ files into a gene × sample count matrix (for differential
-expression) and a TPM matrix (for looking at expression levels), with a QC report that tells you
-whether you should trust them.
+**Goal:** turn raw bulk RNA-seq FASTQ files into a gene × sample count matrix and a TPM matrix,
+test which genes differ between conditions (DESeq2), and produce a QC report that tells you
+whether you should trust any of it.
 
 **Approach:** *pseudo-alignment / selective alignment* with **Salmon** against the transcriptome,
 not genome alignment. Salmon maps each read to the transcripts it is compatible with, then uses
@@ -38,7 +38,9 @@ samplesheet.csv ──► one [meta, reads] item per sample
                                                          ▲          │        │
    transcripts.fa(.gz) ──► SALMON_INDEX (once) ──────────┘          │        │
    transcripts.fa(.gz) ──► MAKE_TX2GENE (if --gencode, no tx2gene) ─┘        │
-                                                                    └──► MERGE_QUANT ──► matrices
+                                                                    ├──► MERGE_QUANT ──► matrices
+   samplesheet.csv (metadata columns) ──────────────────────────────┴──► DESEQ2 ──► DE table, PCA
+                                                    (skipped with one condition or no replicates)
 ```
 
 Each box is one Nextflow **process** in `modules/local/`. Per-sample steps run in parallel.
@@ -150,41 +152,80 @@ name, never by position.
 Names that encode the design (`N61311_dex`, `N61311_untrt`) make the matrices readable, but nothing in
 the pipeline parses them. The nf-test is an exception: it groups samples by name prefix (`ctrl`, `trt`).
 
-### 4.2 What the condition does: currently nothing
+### 4.2 How conditions reach DESeq2
 
-`condition` is read into `meta.condition` and carried along with every sample, **but no current
-step uses it.** FastQC, fastp and Salmon process each sample independently, and per-sample quantification
-does not depend on the experimental group (and shouldn't). The column exists for the planned
-DESeq2 step (README extension 2), which will need the sample → group table.
+The samplesheet file itself is an input to the DESEQ2 step. Every column except `fastq_1`/`fastq_2`
+is **sample metadata**, and the design formula can use any of them. You can add columns freely:
 
-So today, "indicating DE conditions" just means writing them in the samplesheet. Comparing the
-groups is done after the pipeline, on `merged_gene_counts.tsv`.
+```csv
+sample,fastq_1,fastq_2,condition,cell_line
+N61311_untrt,…,…,untreated,N61311
+N61311_dex,…,…,dex,N61311
+```
+
+Three parameters say what to test:
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `--design` | `~ condition` | R model formula over samplesheet columns. **Put the variable you test last**, and the variables you adjust for (batch, donor, cell line) before it |
+| `--contrast` | none | `factor,numerator,denominator`. log2FC = log2(numerator / denominator), so positive = higher in the numerator |
+| `--skip_deseq2` | false | Don't run DESeq2 at all |
+
+**Always give `--contrast` for real data.** Without it, a 2-level factor is compared with the
+**alphabetically first level as the baseline** (DESeq2's default). For the test data that is `control`, which
+is what you want. For airway it would be `dex`, and every fold change would come out with the wrong sign.
+The DESeq2 log states which direction it used, and `deseq2_summary.txt` repeats it.
+
+The other conditions in `meta.condition` are still not used by any per-sample step. FastQC, fastp and Salmon
+treat each sample alone, and quantifying a sample should not depend on its group.
 
 ### 4.3 More than one factor
 
-Real designs often have more than one factor. Airway is a **paired design**: each of 4 cell lines
-was split into untreated and dex. The right DE model is `~ cell_line + condition`, which compares
-treated vs untreated *within* each cell line and removes the large differences between donors.
-The samplesheet has no column for that today. The natural fix, when the DESeq2 module is added, is to
-allow extra columns (e.g. `batch`, `cell_line`, `patient`), keep them in `meta`, and pass a design
-formula as a parameter (`--design '~ cell_line + condition'`).
+Airway is a **paired design**: each of 4 cell lines was split into untreated and dex. Donors differ
+a lot from each other, much more than the dex effect for many genes. `~ cell_line + condition`
+estimates the dex effect *within* each cell line, so donor differences are removed instead of being
+counted as noise. Run it with:
 
-### 4.4 Only one condition
+```bash
+--design '~ cell_line + condition' --contrast condition,dex,untreated
+```
+
+The same pattern covers batch (`~ batch + condition`), patients (`~ patient + treatment`), and so on.
+Interaction designs (`~ genotype * treatment`) parse, but the `--contrast` form only tests a simple
+two-level comparison of one factor. Interaction terms need R directly (load `dds.rds`).
+
+### 4.4 What is checked before the run
+
+`planDeseq2()` in `main.nf` reads the samplesheet before any task starts, so a mistake in the design
+fails in seconds, not after an hour of quantification:
+
+| Situation | What happens |
+|---|---|
+| `--design` names a column that isn't in the samplesheet | **error**, lists the available columns |
+| A design column is empty for some samples | **error**, names them |
+| `--contrast` is not `factor,numerator,denominator`, or names a level that doesn't exist | **error** |
+| The factor has 3+ levels and no `--contrast` | **error**, asks which two to compare |
+| The factor has **only one level** | **warning**, DESeq2 skipped, the rest runs |
+| A compared level has **only one sample** | **warning**, DESeq2 skipped, the rest runs |
+
+`bin/deseq2.R` repeats the essential checks, and also stops if the design has no residual degrees of freedom
+(more model coefficients than the samples can support, e.g. `~ cell_line + condition` with one sample per cell line).
+
+### 4.5 Only one condition
 
 The pipeline runs normally: FastQC, trimming, quantification, matrices and MultiQC do not care
-how many groups there are. Leave `condition` empty (it becomes `NA`) or give every row the same value.
-What you get is **quantification and QC, not differential expression**. That is a perfectly good use:
-expression atlases, checking a library prep, comparing samples by eye with TPM, feeding a
+how many groups there are. DESeq2 is skipped with a warning. Leave `condition` empty or give every row the
+same value. What you get is **quantification and QC, not differential expression**. That is a perfectly
+good use: expression atlases, checking a library prep, comparing samples by eye with TPM, feeding a
 clustering/PCA, or quantifying samples that will be compared with others later.
 
 What you **cannot** do with one condition is test for differential expression: there is nothing to
-contrast. A future DESeq2 step should check for this and skip itself with a clear message (`design
-needs at least 2 levels of condition`) instead of crashing. Two related limits to know:
+contrast. Two related limits:
 
-- **Two conditions, one sample each:** DESeq2 can't estimate biological variance, so its p-values
-  are not meaningful. You can still rank genes by fold change, as a description, not a test.
+- **Two conditions, one sample each:** DESeq2 can't estimate biological variance, so the pipeline
+  skips it. You can still rank genes by fold change from the TPM matrix, as a description, not a test.
 - **Comparing against samples from another run:** possible, but then batch and condition are
-  confounded; you cannot tell biology from batch effects.
+  confounded: you cannot tell biology from batch effects, and no design formula can separate them.
 
 ---
 
@@ -241,15 +282,16 @@ Runs only when `--tx2gene` is not given (`if (tx2gene_file) … else MAKE_TX2GEN
 | | |
 |---|---|
 | Input | the transcriptome FASTA |
-| Command | `make_tx2gene.py transcripts.fa.gz > tx2gene.tsv` |
-| Output | `tx2gene.tsv`: `ENST00000832824.1<TAB>ENSG00000290825.2` |
+| Command | `make_tx2gene.py transcripts.fa.gz --names gene_names.tsv > tx2gene.tsv` |
+| Output | `tx2gene.tsv`: `ENST00000832824.1<TAB>ENSG00000290825.2` (one row per transcript, no header) |
+| | `gene_names.tsv`: `gene_id<TAB>gene_name` (one row per gene, with header); used by DESEQ2 |
 
 A GENCODE header has 8 `|`-separated fields:
 `>ENST00000832824.1|ENSG00000290825.2|-|-|DDX11L16-260|DDX11L16|1379|lncRNA|`
 (transcript ID, gene ID, Havana gene, Havana transcript, transcript name, **gene name**, length,
-biotype). The script keeps fields 1 and 2. It exits with an error if a header has no `|`, i.e. if the FASTA isn't
-GENCODE-style. Gene IDs keep their version suffix (`.2`). Gene **names** are not in the output, so
-to look up `DUSP1` you need to map names to IDs from field 6.
+biotype). The script keeps fields 1 and 2 for tx2gene, and fields 2 and 6 for the name table. It exits with an
+error if a header has no `|`, i.e. if the FASTA isn't GENCODE-style. Gene IDs keep their version suffix
+(`.2`). If you give your own `--tx2gene`, there is no name table, and the DE results have IDs only.
 
 ### 5.4 SALMON_INDEX: index the transcriptome (`modules/local/salmon_index.nf`)
 
@@ -329,7 +371,74 @@ list, so MERGE_QUANT runs once. `stageAs: 'quant/*'` puts all the folders in a `
 the task directory. The script takes each sample name from its folder name, sorts the samples
 alphabetically, and writes a feature × sample table (missing features = 0).
 
-### 5.7 MULTIQC: one report (`modules/local/multiqc.nf`, `assets/multiqc_config.yml`)
+### 5.7 DESEQ2: differential expression (`modules/local/deseq2.nf`, `bin/deseq2.R`)
+
+| | |
+|---|---|
+| Purpose | Test, gene by gene, whether expression differs between two levels of a factor, adjusting for the other design variables |
+| Input | all Salmon folders (`ch_quant_dirs`, the same collected list MERGE_QUANT gets), `tx2gene.tsv`, the samplesheet, `gene_names.tsv` or `[]` |
+| Command | `deseq2.R --quant_dir quant --tx2gene tx2gene.tsv --samplesheet samplesheet.csv --design '~ cell_line + condition' --alpha 0.05 --contrast condition,dex,untreated --gene_names gene_names.tsv --outdir .` |
+| Output | see the table below; published to `results/deseq2/` |
+| Container | `community.wave.seqera.io/library/bioconductor-deseq2_bioconductor-tximport:9f6b62bb2b7e1cb9` (R 4.5.3, DESeq2 1.50.2, tximport 1.38.2) |
+| Resources | `process_low` (2 CPUs, 4 GB). DESeq2 runs single-threaded here |
+
+**Why this container is different.** Biocontainers images hold one tool each, and this step needs two
+R packages. [Seqera Containers](https://seqera.io/containers/) builds an image from any list of conda
+packages, and its tag is a hash of that list, so the same list always gives the same image. nf-core uses
+it for every module with several tools. It was built with one API call (`POST https://wave.seqera.io/v1alpha2/container`,
+packages `bioconductor-deseq2=1.50.2`, `bioconductor-tximport=1.38.2`, `freeze: true`).
+
+`[]` for an optional input: when there's no gene-name table, the workflow passes an empty list as
+`gene_names`. Nextflow stages nothing, `gene_names` is false in the script block, and the flag is left out.
+This is the standard nf-core way to make a `path` input optional.
+
+What `deseq2.R` does, in order:
+
+1. **Sample table.** Reads the samplesheet, drops the FASTQ columns, turns the design variables into
+   factors, and **relevels** the tested factor so the contrast's denominator is the reference level.
+2. **tximport** (`type = "salmon"`, `dropInfReps = TRUE`). Reads each `quant.sf`, sums transcripts to genes
+   with tx2gene, and records each gene's **average transcript length per sample**, weighted by isoform
+   abundance. `dropInfReps` skips Salmon bootstrap replicates, which this pipeline doesn't create.
+3. **`DESeqDataSetFromTximport`.** Rounds the counts and turns those lengths into per-gene, per-sample
+   normalization offsets. A gene whose isoform mix shifts to longer transcripts gets more reads without
+   being more expressed, and the offsets account for that.
+4. **Low-count filter.** Keeps genes with ≥ 10 reads in at least as many samples as the smallest compared
+   group. Genes with almost no reads can't be significant and only add to the multiple-testing burden.
+5. **`estimateSizeFactors`.** The **median-of-ratios** normalization: each sample's scaling factor is the median,
+   over genes, of its count divided by that gene's geometric mean across samples. It assumes most genes don't
+   change, which makes it robust to a few very large changes. TPM is not, and that is why
+   the synthetic unchanged genes look 0.82× in TPM but ≈ 1× in DESeq2.
+6. **`estimateDispersions`.** For each gene, how much counts vary between replicates beyond Poisson noise
+   (the negative binomial "dispersion"). DESeq2 fits a trend of dispersion against mean expression and
+   **shrinks** each gene's estimate towards it, which matters when there are only 2-4 replicates. If the
+   trend fit fails (it needs many genes; the synthetic data has 8), the script falls back to gene-wise estimates.
+7. **`nbinomWaldTest` + `results(contrast = …, alpha = 0.05)`.** Fits the model for every gene and tests
+   the log2 fold change ≠ 0. `padj` is Benjamini-Hochberg adjusted. `alpha` also tunes DESeq2's
+   **independent filtering**: very low-mean genes get `padj = NA` when removing them gives more discoveries.
+8. **VST** (`vst(blind = TRUE)`). Variance-stabilizing transform for PCA and clustering: on log2(counts) low
+   counts are very noisy; VST evens that out. `blind = TRUE` ignores the design, the recommended setting for QC.
+
+Outputs:
+
+| File | Content |
+|---|---|
+| `deseq2_results.tsv` | One row per tested gene, **sorted by padj**: `gene_id`, `gene_name` (with GENCODE), `baseMean` (mean normalized count), `log2FoldChange`, `lfcSE`, `stat` (Wald statistic), `pvalue`, `padj` |
+| `deseq2_summary.txt` | Design, contrast and direction, number of samples and genes, number up/down at `padj < alpha` |
+| `normalized_counts.tsv` | Counts divided by the normalization factors: comparable across samples |
+| `vst_counts.tsv` | VST values (log2-like scale) for PCA, heatmaps, clustering |
+| `pca.pdf`, `pca.tsv` | PC1 vs PC2 of the 500 most variable genes, colored by the tested factor |
+| `ma_plot.pdf` | log2FC against mean expression; significant genes highlighted |
+| `volcano.pdf` | log2FC against −log10 p-value; the top 15 significant genes labeled |
+| `dds.rds` | The fitted DESeq2 object: `dds <- readRDS("dds.rds")` in R to try other contrasts or plots |
+| `R_sessionInfo.log` | Exact R and package versions |
+
+Reading the results: `log2FoldChange` +2 means 4× higher in the numerator. `padj < 0.05` means the gene is
+called significant at a 5% false discovery rate. A small padj with a tiny fold change can be real but
+biologically uninteresting, and a large fold change with `padj = NA` was filtered as too lowly expressed.
+The fold changes are **not shrunk**. For ranking genes by effect size, `lfcShrink()` (apeglm or ashr) on `dds.rds`
+gives more stable estimates for low-count genes.
+
+### 5.8 MULTIQC: one report (`modules/local/multiqc.nf`, `assets/multiqc_config.yml`)
 
 | | |
 |---|---|
@@ -363,6 +472,8 @@ results/
 │   ├── merged_transcript_counts.tsv transcript × sample
 │   ├── merged_transcript_tpm.tsv
 │   └── mapping_summary.tsv          sample, reads_processed, percent_mapped
+├── deseq2/          deseq2_results.tsv, deseq2_summary.txt, normalized_counts.tsv, vst_counts.tsv,
+│                    pca.{pdf,tsv}, ma_plot.pdf, volcano.pdf, dds.rds    (when DESeq2 runs)
 ├── multiqc/         multiqc_report.html, multiqc_report_data/
 └── pipeline_info/   timeline_*.html  report_*.html  trace_*.txt  dag_*.html  software_versions.yml
 ```
@@ -372,11 +483,9 @@ long (find the bottleneck), `report` shows CPU/memory per task (tune the labels)
 a table, `dag` draws the workflow graph, and `software_versions.yml` lists every tool version (for
 methods sections).
 
-**Taking counts into DESeq2/edgeR:** the merged counts are fractional, and they do not carry Salmon's
-per-sample effective lengths. The recommended route is `tximport` (R) on the per-sample `quant.sf` +
-`tx2gene.tsv`, which passes length offsets to DESeq2 (`DESeqDataSetFromTximport`). Rounding
-`merged_gene_counts.tsv` and using `DESeqDataSetFromMatrix` also works and is common, but it ignores
-differences in isoform usage between samples.
+**Using the merged counts elsewhere** (edgeR, limma-voom): they are fractional, and they do not carry
+Salmon's per-sample effective lengths. The DESEQ2 step avoids this by importing with tximport. For other tools,
+tximport with `countsFromAbundance = "lengthScaledTPM"` is the recommended way to get counts.
 
 ---
 
@@ -391,6 +500,10 @@ differences in isoform usage between samples.
 | `--tx2gene` | none | transcript→gene TSV. Required unless `--gencode` |
 | `--gencode` | false | GENCODE headers: `salmon index --gencode` and build tx2gene automatically |
 | `--salmon_k` | 31 | k-mer size for the index |
+| `--design` | `~ condition` | DESeq2 model formula over samplesheet columns (section 4.2) |
+| `--contrast` | none | `factor,numerator,denominator` |
+| `--deseq2_alpha` | 0.05 | padj cutoff for the summary, plots and independent filtering |
+| `--skip_deseq2` | false | quantification and QC only |
 | `--outdir` | `results` | where published files go |
 | `--multiqc_config` | `assets/multiqc_config.yml` | MultiQC settings |
 
@@ -422,7 +535,7 @@ Combine with commas: `-profile test,docker`.
 | Label | CPUs | Memory | Used by |
 |---|---|---|---|
 | `process_single` | 1 | 2 GB | MAKE_TX2GENE, MERGE_QUANT, MULTIQC |
-| `process_low` | 2 | 4 GB | FASTQC |
+| `process_low` | 2 | 4 GB | FASTQC, DESEQ2 |
 | `process_medium` | 4 | 8 GB | FASTP, SALMON_QUANT |
 | `process_high` | 8 | 16 GB | SALMON_INDEX |
 
@@ -437,17 +550,29 @@ Combine with commas: `-profile test,docker`.
 
 | Test | Command | What it proves |
 |---|---|---|
-| Python unit tests | `python3 -m unittest discover -s tests -v` | `make_tx2gene.py` and `merge_salmon.py` parse and write correctly (seconds, no Nextflow) |
+| Python unit tests | `python3 -m unittest discover -s tests -v` | `make_tx2gene.py` (including the gene-name table) and `merge_salmon.py` parse and write correctly (seconds, no Nextflow) |
 | Pipeline test | `nextflow run main.nf -profile test,docker` | The whole pipeline runs on the synthetic data |
-| nf-test | `nf-test test` | Runs the test profile **and checks the biology**: GENE_UP > 2.5× up, GENE_DOWN > 2.5× down, GENE_A unchanged (`tests/main.nf.test`) |
+| nf-test | `nf-test test` | Three tests (`tests/main.nf.test`): **(1)** TPM: GENE_UP > 2.5× up, GENE_DOWN > 2.5× down, GENE_A unchanged. **(2)** DESeq2: GENE_UP log2FC in 1.5..2.5 and GENE_DOWN in −2.5..−1.5 (truth ±2), both padj < 0.01, the six unchanged genes \|log2FC\| < 0.5. **(3)** one-condition samplesheet: run succeeds, no DESEQ2 task, quantification done |
 | CI | push to GitHub | `.github/workflows/ci.yml` runs the unit tests then nf-test with Docker |
+
+On the synthetic data DESeq2 gives GENE_UP +2.03, GENE_DOWN −1.87, unchanged genes −0.05 to +0.27, and
+exactly those 2 genes at padj < 0.05.
 
 The synthetic data has a known answer (`scripts/simulate_test_data.py`, `assets/test_data/truth.tsv`).
 That is the point of it: a test that only checks "it finished" passes on a pipeline that gives wrong numbers.
 
-Real-data check (airway, `scripts/fetch_airway.sh`, first 1M pairs × 8 samples): the known
-glucocorticoid-response genes are up in dex in all 4 cell lines (log2 TPM ratio: KLF15 3.5-4.9,
-ZBTB16 3.7-4.5, FKBP5 3.1-4.0, DUSP1 2.3-3.6, TSC22D3 2.5-4.2), GAPDH flat. Not yet an automated test.
+Real-data check (airway, `scripts/fetch_airway.sh`, first 1M pairs × 8 samples,
+`--design '~ cell_line + condition' --contrast condition,dex,untreated`), run by hand, not an automated test:
+
+- 9,477 genes tested, **512 at padj < 0.05** (335 up, 177 down). Full-depth airway gives far more; 1M
+  reads per sample means much less power.
+- The known glucocorticoid-response genes are all significant and up: ZBTB16 +6.4, KLF15 +5.8, FKBP5 +3.7,
+  TSC22D3 +3.2, DUSP1 +2.9, PER1 +2.6, CRISPLD2 +2.6 (log2FC). GAPDH −0.22, padj 0.56.
+- Top hits by padj: GPX3, ADAMTS1, CXCL12 (down), COL1A1 (down), NNMT, FKBP5.
+- PCA: PC1 separates dex from untreated in every cell line; PC2 separates out cell line N080611, which is
+  the donor effect the `cell_line` term removes.
+- ACTB is also called up (+0.84, padj 2e-6). Unexplained: possibly real, possibly from using the first
+  reads of each run instead of a random sample.
 
 ---
 
@@ -462,6 +587,7 @@ scripts/fetch_airway.sh                          # → ~/bioinfo-data/airway
 nextflow run main.nf -profile docker \
     --input ~/bioinfo-data/airway/samplesheet.csv \
     --transcriptome ~/bioinfo-data/airway/ref/gencode.v50.transcripts.fa.gz --gencode \
+    --design '~ cell_line + condition' --contrast condition,dex,untreated \
     --outdir ~/bioinfo-data/airway/results -work-dir ~/bioinfo-data/airway/work -resume
 ```
 
@@ -492,7 +618,8 @@ once), "Missing output file(s)": the tool ran but didn't write the file name the
 
 ## 10. What it does not do (yet)
 
-- **No differential expression.** It stops at matrices; `condition` is carried but unused (section 4).
+- **One contrast per run**, no interaction tests, no shrunken fold changes (use `dds.rds` in R).
+- **CI tests the Docker profile only.** The conda profile (including DESeq2) has been checked by hand.
 - **Basic samplesheet validation only**: required columns, files exist, unique and file-name-safe
   sample names. No schema for the other columns or parameters yet (nf-schema, README extension 3).
 - **No lane merging**: one row per sample.

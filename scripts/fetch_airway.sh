@@ -44,7 +44,7 @@ fetch_head() {   # url -> first N reads (4N lines) gzipped to $2
 }
 
 FAILED=0
-echo "sample,fastq_1,fastq_2,condition" > "$OUT/samplesheet.csv"
+echo "sample,fastq_1,fastq_2,condition,cell_line" > "$OUT/samplesheet.csv"
 for entry in $SAMPLES; do
     IFS=: read -r run name cond <<< "$entry"
     sub=${run: -1}   # ENA folder: 00 + last digit of the run accession
@@ -52,7 +52,7 @@ for entry in $SAMPLES; do
         fetch_head "$ENA/00$sub/$run/${run}_$r.fastq.gz" "$OUT/fastq/${name}_R$r.fastq.gz" &
     done
     for job in $(jobs -p); do wait "$job" || FAILED=1; done
-    echo "$name,fastq/${name}_R1.fastq.gz,fastq/${name}_R2.fastq.gz,$cond" >> "$OUT/samplesheet.csv"
+    echo "$name,fastq/${name}_R1.fastq.gz,fastq/${name}_R2.fastq.gz,$cond,${name%%_*}" >> "$OUT/samplesheet.csv"
 done
 
 TX="$OUT/ref/gencode.v${GENCODE}.transcripts.fa.gz"

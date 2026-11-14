@@ -8,10 +8,11 @@ process MAKE_TX2GENE {
     path fasta
 
     output:
-    path "tx2gene.tsv", emit: tsv
+    path "tx2gene.tsv"   , emit: tsv
+    path "gene_names.tsv", emit: names
 
     script:
     """
-    make_tx2gene.py $fasta > tx2gene.tsv
+    make_tx2gene.py $fasta --names gene_names.tsv > tx2gene.tsv
     """
 }
