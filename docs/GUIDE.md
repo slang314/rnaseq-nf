@@ -539,7 +539,7 @@ Combine with commas: `-profile test,docker`.
 | `process_medium` | 4 | 8 GB | FASTP, SALMON_QUANT |
 | `process_high` | 8 | 16 GB | SALMON_INDEX |
 
-- `resourceLimits = [cpus: 6, memory: 20.GB]` caps every request to what WSL2 is given.
+- `resourceLimits = [cpus: 6, memory: 20.GB]` caps every request (defaults fit a 6-core, 24 GB workstation; raise them for bigger machines).
 - Memory is `× task.attempt`: if a task is killed for using too much memory (exit 137 etc.), it is retried once with double memory.
 - Nextflow runs as many tasks at once as fit under the limits. With 4-CPU Salmon tasks and a 6-CPU cap,
   only **one quant runs at a time**. Setting `process_medium` to 3 CPUs would let two run side by side.

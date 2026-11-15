@@ -6,3 +6,6 @@ results/
 .nf-test.log
 __pycache__/
 *.pyc
+
+# Local notes for Claude Code (not part of the pipeline)
+CLAUDE.md
