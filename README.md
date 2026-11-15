@@ -137,32 +137,3 @@ results/
 └── pipeline_info/     timeline, resource report, trace, DAG, software_versions.yml
 ```
 
-## About the test data
-
-`assets/test_data/` is fully synthetic (`scripts/simulate_test_data.py`):
-8 genes, some with alternative isoforms that share exons, 4 samples × 5,000
-read pairs, 0.5% sequencing errors, and 3% short fragments that run into the adapter.
-`GENE_UP` is simulated 4× higher and `GENE_DOWN` 4× lower in "treated". The
-nf-test checks that Salmon recovers those changes and that DESeq2 calls exactly
-those two genes (log2FC ≈ ±2), so the tests catch results that are wrong as well
-as runs that crash. A third test checks that a one-condition samplesheet skips DESeq2 cleanly.
-
-## Container tags
-
-The Docker image tags are pinned to biocontainers releases. If one fails to
-pull (tags get rebuilt now and then), look up the current tag at
-`https://quay.io/repository/biocontainers/<tool>?tab=tags`, or switch to `-profile conda`.
-
-## Extensions (roughly in order of difficulty)
-
-1. **Decoy-aware Salmon index**: add the genome as decoys (`--decoys`); this
-   is what nf-core/rnaseq does, and it reduces false mappings.
-2. ~~**DESeq2 module**~~ done: tximport + DESeq2, design and contrast from the
-   samplesheet. Next: `lfcShrink`, several contrasts per run, DE results in MultiQC.
-3. **Samplesheet validation with the `nf-schema` plugin** and a `nextflow_schema.json`.
-4. **STAR + featureCounts branch** behind a `--aligner star` parameter (the AstraZeneca
-   posting lists both).
-5. **Stranded-library check**: read `lib_format_counts.json` and warn when the
-   detected library type doesn't match the expected one.
-6. **Cloud profile**: an `awsbatch` profile, plus running from Seqera Platform.
-7. **Port to single-cell**: swap Salmon for `simpleaf`/alevin-fry and add a Scanpy QC step.
