@@ -25,6 +25,8 @@ samplesheet.csv
 
 ## Features
 
+- Follows nf-core conventions (module layout, resource labels, `ext.args`, test profiles), but it is an
+  independent pipeline and not part of nf-core.
 - Quantifies with Salmon against the transcriptome, then summarises to genes with a transcript→gene map.
   With `--gencode`, the map is built from GENCODE FASTA headers.
 - DESeq2 with any design that uses samplesheet columns (for example `~ cell_line + condition`).
