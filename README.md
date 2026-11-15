@@ -30,29 +30,10 @@ samplesheet.csv
 | CI / Git | `.github/workflows/ci.yml` runs every test on every push |
 | Standard NGS tools | FastQC, fastp, Salmon, MultiQC, tximport + DESeq2 |
 
-## Setup on Windows (WSL2)
-
-Everything runs inside WSL2 Ubuntu, so you avoid the Windows path and conda
-problems.
-
-```bash
-# 1. In PowerShell (admin), once:
-wsl --install -d Ubuntu-24.04
-# 2. Install Docker Desktop -> Settings -> Resources -> WSL integration -> enable Ubuntu
-# 3. Inside Ubuntu:
-sudo apt update && sudo apt install -y git openjdk-17-jre-headless   # Nextflow needs Java 17+
-curl -s https://get.nextflow.io | bash && sudo mv nextflow /usr/local/bin/
-curl -fsSL https://get.nf-test.com | bash && sudo mv nf-test /usr/local/bin/
-docker run --rm hello-world           # confirms Docker works from WSL
-```
-
-Keep the repo and data in the Linux filesystem (`~/projects/...`), not under
-`/mnt/c/...`. Disk I/O across the Windows boundary is many times slower.
-
 ## Run
 
 ```bash
-git clone <your-repo-url> rnaseq-nf && cd rnaseq-nf
+git clone https://github.com/slang314/rnaseq-nf rnaseq-nf && cd rnaseq-nf
 
 # Synthetic test, takes a few minutes
 nextflow run main.nf -profile test,docker
